@@ -1,0 +1,189 @@
+# Genesys Cloud AI Search & Analytics Platform
+# Serverless Framework Configuration
+
+service: genesys-ai-search-platform
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  profile: ${opt:aws-profile, 'personal'}
+  memorySize: 512
+  timeout: 30
+  
+  # Environment variables available to all functions
+  environment:
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    OPENSEARCH_DOMAIN: ${self:custom.opensearchDomain}
+    OPENSEARCH_ENDPOINT: !GetAtt OpenSearchDomain.DomainEndpoint
+    BEDROCK_MODEL_ID: ${self:custom.bedrockModelId}
+    TITAN_EMBEDDING_MODEL: ${self:custom.titanEmbeddingModel}
+    
+  # IAM permissions for all functions
+  iam:
+    role:
+      statements:
+        # OpenSearch permissions
+        - Effect: Allow
+          Action:
+            - es:ESHttpGet
+            - es:ESHttpPost
+            - es:ESHttpPut
+            - es:ESHttpDelete
+          Resource: 
+            - "arn:aws:es:${self:provider.region}:*:domain/${self:custom.opensearchDomain}/*"
+        
+        # Bedrock permissions
+        - Effect: Allow
+          Action:
+            - bedrock:InvokeModel
+            - bedrock:InvokeModelWithResponseStream
+          Resource: "*"
+        
+        # SSM permissions
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+            - ssm:GetParameters
+          Resource: 
+            - "arn:aws:ssm:${self:provider.region}:*:parameter/audit/*"
+            - "arn:aws:ssm:${self:provider.region}:*:parameter/genesys/*"
+        
+        # Step Functions permissions
+        - Effect: Allow
+          Action:
+            - states:StartExecution
+            - states:DescribeExecution
+          Resource: "*"
+        
+        # EventBridge permissions
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource: "*"
+
+# Custom variables for reusability
+custom:
+  # Environment-specific configurations
+  opensearchDomain: genesys-ai-search-${self:provider.stage}
+  bedrockModelId: anthropic.claude-3-sonnet-20240229-v1:0
+  titanEmbeddingModel: amazon.titan-embed-text-v1
+  
+  # Serverless plugins configuration
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude: 
+      - aws-sdk
+    target: node18
+    define:
+      require.resolve: undefined
+    platform: node
+    concurrency: 10
+
+# Plugins
+plugins:
+  - serverless-esbuild
+  - serverless-offline
+
+# Lambda Functions
+functions:
+  # Streaming pipeline - Real-time audit processing
+  streamingProcessor:
+    handler: src/lambdas/streaming/processor.handler
+    description: "Processes real-time audit notifications from Genesys Cloud"
+    memorySize: 1024
+    timeout: 300
+    events:
+      - eventBridge:
+          pattern:
+            source:
+              - "genesys.cloud.audit"
+    environment:
+      OPENSEARCH_INDEX: audits_chunks
+  
+  # Backfill pipeline - Historical data processing
+  backfillProcessor:
+    handler: src/lambdas/backfill/processor.handler
+    description: "Processes historical audit data in batches"
+    memorySize: 2048
+    timeout: 900
+    environment:
+      OPENSEARCH_INDEX: audits_chunks
+      SSM_CHECKPOINT_PATH: /audit/backfill_checkpoint_iso
+  
+  # Search API - AI-powered search endpoint
+  searchApi:
+    handler: src/lambdas/api/search.handler
+    description: "AI-powered search API with RAG capabilities"
+    memorySize: 1024
+    timeout: 30
+    events:
+      - http:
+          path: /search
+          method: post
+          cors: true
+    environment:
+      AUDITS_INDEX: audits_chunks
+      KB_INDEX: kb_chunks
+
+  # Knowledge Base processor
+  kbProcessor:
+    handler: src/lambdas/kb/processor.handler
+    description: "Processes Genesys Cloud Knowledge Base documents"
+    memorySize: 1024
+    timeout: 300
+    environment:
+      OPENSEARCH_INDEX: kb_chunks
+
+  # KB Compute Batches - Compute KB document batches for parallel processing
+  kbComputeBatches:
+    handler: src/lambdas/kb/compute-batches.handler
+    description: "Computes KB document batches for parallel processing"
+    memorySize: 1024
+    timeout: 300
+
+  # KB Batch Processor - Process KB document batches
+  kbBatchProcessor:
+    handler: src/lambdas/kb/bulk-import.handler
+    description: "Processes KB document batches in parallel"
+    memorySize: 2048
+    timeout: 900
+    environment:
+      OPENSEARCH_INDEX: kb_chunks
+
+# AWS Resources
+resources:
+  # Import additional CloudFormation resources
+  - ${file(infrastructure/resources/opensearch.yml)}
+  - ${file(infrastructure/resources/stepfunctions.yml)}
+  - ${file(infrastructure/resources/eventbridge.yml)}
+  - ${file(infrastructure/resources/ssm.yml)}
+
+
+# Outputs for other services/applications
+outputs:
+  ApiGatewayRestApiId:
+    Value:
+      Ref: ApiGatewayRestApi
+    Export:
+      Name: ${self:service}-${self:provider.stage}-ApiGatewayRestApiId
+  
+  SearchApiUrl:
+    Value:
+      Fn::Join:
+        - ""
+        - - "https://"
+          - Ref: ApiGatewayRestApi
+          - ".execute-api."
+          - ${self:provider.region}
+          - ".amazonaws.com/"
+          - ${self:provider.stage}
+    Export:
+      Name: ${self:service}-${self:provider.stage}-SearchApiUrl

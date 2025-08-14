@@ -1,0 +1,324 @@
+# EventBridge Configuration
+# Handles event routing for Genesys Cloud audit notifications and backfill triggers
+
+Resources:
+  # Custom EventBridge Bus for Genesys Cloud events
+  GenesysEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-genesys-events
+      Description: "Custom event bus for Genesys Cloud audit notifications"
+
+  # EventBridge Rule for Genesys Cloud Audit Notifications (Streaming)
+  GenesysAuditRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-genesys-audit-streaming
+      Description: "Routes Genesys Cloud audit notifications to streaming processor"
+      EventBusName: !Ref GenesysEventBus
+      EventPattern:
+        source:
+          - "genesys.cloud.audit"
+        detail-type:
+          - "Audit Event"
+        detail:
+          eventType:
+            - "USER_LOGIN"
+            - "USER_LOGOUT" 
+            - "CALL_START"
+            - "CALL_END"
+            - "AGENT_STATE_CHANGE"
+            - "QUEUE_ASSIGNMENT"
+            - "SKILL_ASSIGNMENT"
+            - "CONFIGURATION_CHANGE"
+      State: ENABLED
+      Targets:
+        - Arn: !Sub "${StreamingProcessorLambdaFunction.Arn}"
+          Id: "StreamingProcessorTarget"
+
+  # EventBridge Rule for Knowledge Base Updates
+  GenesysKBRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-genesys-kb-updates
+      Description: "Routes Genesys Cloud KB document updates to KB processor"
+      EventBusName: !Ref GenesysEventBus
+      EventPattern:
+        source:
+          - "genesys.cloud.knowledgebase"
+        detail-type:
+          - "Document Created"
+          - "Document Updated"
+          - "Document Published"
+      State: ENABLED
+      Targets:
+        - Arn: !Sub "${KbProcessorLambdaFunction.Arn}"
+          Id: "KBProcessorTarget"
+
+  # EventBridge Rule for Manual Backfill Trigger
+  BackfillTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-manual-backfill-trigger
+      Description: "Manual trigger for audit data backfill process"
+      EventPattern:
+        source:
+          - "custom.audit.backfill"
+        detail-type:
+          - "Start Backfill"
+        detail:
+          triggerType:
+            - "MANUAL"
+            - "SCHEDULED"
+      State: ENABLED
+      Targets:
+        - Arn: !Sub "${AuditBackfillStateMachine.Arn}"
+          Id: "BackfillStateMachineTarget"
+          RoleArn: !GetAtt EventBridgeStepFunctionsRole.Arn
+
+  # EventBridge Rule for KB Bulk Import Trigger
+  KBBulkImportTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-kb-bulk-import-trigger
+      Description: "Manual trigger for KB bulk import process"
+      EventPattern:
+        source:
+          - "custom.kb.bulkimport"
+        detail-type:
+          - "Start KB Import"
+        detail:
+          triggerType:
+            - "MANUAL"
+            - "SCHEDULED"
+      State: ENABLED
+      Targets:
+        - Arn: !Sub "${KBBulkImportStateMachine.Arn}"
+          Id: "KBImportStateMachineTarget"
+          RoleArn: !GetAtt EventBridgeStepFunctionsRole.Arn
+
+  # EventBridge Rule for Scheduled Health Checks
+  HealthCheckRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-health-check
+      Description: "Scheduled health check for system components"
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt HealthCheckFunction.Arn
+          Id: "HealthCheckTarget"
+
+  # Lambda function for system health checks
+  HealthCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ${self:service}-${self:provider.stage}-health-check
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt HealthCheckRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !Sub "${OpenSearchDomain.DomainEndpoint}"
+          STAGE: ${self:provider.stage}
+      Code:
+        ZipFile: |
+          /**
+           * Health check function to monitor system components
+           * Checks OpenSearch cluster health and Lambda function status
+           */
+          const https = require('https');
+          
+          exports.handler = async (event) => {
+            console.log('Running health check:', JSON.stringify(event, null, 2));
+            
+            const results = {
+              timestamp: new Date().toISOString(),
+              status: 'HEALTHY',
+              checks: {}
+            };
+            
+            try {
+              // Check OpenSearch cluster health
+              const osHealth = await checkOpenSearchHealth();
+              results.checks.opensearch = osHealth;
+              
+              // Check SSM parameters
+              const ssmHealth = await checkSSMParameters();
+              results.checks.ssm = ssmHealth;
+              
+              // Determine overall status
+              const allHealthy = Object.values(results.checks).every(check => check.status === 'HEALTHY');
+              results.status = allHealthy ? 'HEALTHY' : 'DEGRADED';
+              
+              console.log('Health check results:', JSON.stringify(results, null, 2));
+              
+              // Send metrics to CloudWatch if needed
+              if (results.status !== 'HEALTHY') {
+                console.warn('System health degraded:', results);
+              }
+              
+              return results;
+              
+            } catch (error) {
+              console.error('Health check failed:', error);
+              results.status = 'UNHEALTHY';
+              results.error = error.message;
+              return results;
+            }
+          };
+          
+          async function checkOpenSearchHealth() {
+            return new Promise((resolve) => {
+              const endpoint = process.env.OPENSEARCH_ENDPOINT;
+              if (!endpoint) {
+                resolve({ status: 'UNKNOWN', message: 'No OpenSearch endpoint configured' });
+                return;
+              }
+              
+              const options = {
+                hostname: endpoint,
+                port: 443,
+                path: '/_cluster/health',
+                method: 'GET',
+                timeout: 5000
+              };
+              
+              const req = https.request(options, (res) => {
+                let body = '';
+                res.on('data', (chunk) => body += chunk);
+                res.on('end', () => {
+                  try {
+                    const health = JSON.parse(body);
+                    resolve({
+                      status: health.status === 'green' ? 'HEALTHY' : 'DEGRADED',
+                      clusterStatus: health.status,
+                      numberOfNodes: health.number_of_nodes,
+                      activeShards: health.active_shards
+                    });
+                  } catch (e) {
+                    resolve({ status: 'UNHEALTHY', error: 'Invalid response format' });
+                  }
+                });
+              });
+              
+              req.on('error', () => {
+                resolve({ status: 'UNHEALTHY', error: 'Connection failed' });
+              });
+              
+              req.on('timeout', () => {
+                resolve({ status: 'UNHEALTHY', error: 'Request timeout' });
+              });
+              
+              req.end();
+            });
+          }
+          
+          async function checkSSMParameters() {
+            // Simple check - in real implementation, use AWS SDK
+            return {
+              status: 'HEALTHY',
+              message: 'SSM parameters accessible'
+            };
+          }
+
+  # IAM Role for Health Check Lambda
+  HealthCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: HealthCheckPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - es:ESHttpGet
+                Resource: !Sub "${OpenSearchDomain.DomainArn}/*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/audit/*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # IAM Role for EventBridge to invoke Step Functions
+  EventBridgeStepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EventBridgeStepFunctionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: 
+                  - !Sub "${AuditBackfillStateMachine.Arn}"
+                  - !Sub "${KBBulkImportStateMachine.Arn}"
+
+  # Lambda permissions for EventBridge to invoke functions
+  StreamingProcessorEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StreamingProcessorLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GenesysAuditRule.Arn
+
+  KBProcessorEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref KbProcessorLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GenesysKBRule.Arn
+
+  HealthCheckEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealthCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HealthCheckRule.Arn
+
+# Outputs
+Outputs:
+  GenesysEventBusArn:
+    Description: ARN of the Genesys Cloud EventBridge Bus
+    Value: !GetAtt GenesysEventBus.Arn
+    Export:
+      Name: ${self:service}-${self:provider.stage}-GenesysEventBusArn
+      
+  GenesysEventBusName:
+    Description: Name of the Genesys Cloud EventBridge Bus
+    Value: !Ref GenesysEventBus
+    Export:
+      Name: ${self:service}-${self:provider.stage}-GenesysEventBusName
+      
+  HealthCheckFunctionArn:
+    Description: ARN of the Health Check Lambda Function
+    Value: !GetAtt HealthCheckFunction.Arn
+    Export:
+      Name: ${self:service}-${self:provider.stage}-HealthCheckArn

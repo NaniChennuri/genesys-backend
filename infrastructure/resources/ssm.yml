@@ -1,0 +1,262 @@
+# SSM Parameter Store Configuration
+# Manages system configuration and state tracking for the audit processing system
+
+Resources:
+  # Backfill process state parameters
+  BackfillRunningParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/backfill_running
+      Type: String
+      Value: "false"
+      Description: "Indicates if audit backfill process is currently running"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "backfill-state"
+
+  BackfillCheckpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/backfill_checkpoint_iso
+      Type: String
+      Value: "1970-01-01T00:00:00.000Z"
+      Description: "ISO timestamp of last successfully processed audit record during backfill"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "backfill-checkpoint"
+
+  BackfillCompletionParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/backfill_1y_done
+      Type: String
+      Value: "false"
+      Description: "Indicates if 1-year audit backfill has been completed"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "backfill-completion"
+
+  # Streaming process configuration parameters
+  StreamingLastProcessedParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/streaming_last_processed
+      Type: String
+      Value: "1970-01-01T00:00:00.000Z"
+      Description: "ISO timestamp of last processed streaming audit event"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "streaming-checkpoint"
+
+  # System configuration parameters
+  BatchSizeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/batch_size
+      Type: String
+      Value: "100"
+      Description: "Number of audit records to process in each batch"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "configuration"
+
+  MaxConcurrencyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/max_concurrency
+      Type: String
+      Value: "5"
+      Description: "Maximum number of parallel processing windows during backfill"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "configuration"
+
+  ChunkSizeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/chunk_size
+      Type: String
+      Value: "1000"
+      Description: "Maximum size of text chunks for embedding (in characters)"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "configuration"
+
+  ChunkOverlapParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/chunk_overlap
+      Type: String
+      Value: "200"
+      Description: "Character overlap between consecutive text chunks"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "configuration"
+
+  # OpenSearch configuration parameters
+  OpenSearchBulkSizeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/opensearch_bulk_size
+      Type: String
+      Value: "50"
+      Description: "Number of documents to include in each OpenSearch bulk operation"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "opensearch-config"
+
+  # Bedrock model configuration parameters
+  BedrockModelIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/bedrock_model_id
+      Type: String
+      Value: "anthropic.claude-3-sonnet-20240229-v1:0"
+      Description: "Bedrock model ID for LLM responses"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "bedrock-config"
+
+  TitanEmbeddingModelParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/titan_embedding_model
+      Type: String
+      Value: "amazon.titan-embed-text-v1"
+      Description: "Titan model ID for text embeddings"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "bedrock-config"
+
+  # Search configuration parameters
+  SearchResultsLimitParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/search_results_limit
+      Type: String
+      Value: "10"
+      Description: "Maximum number of search results to return from OpenSearch"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "search-config"
+
+  SearchSimilarityThresholdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/search_similarity_threshold
+      Type: String
+      Value: "0.7"
+      Description: "Minimum similarity score for search results (0.0 to 1.0)"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "search-config"
+
+  # Knowledge Base configuration parameters
+  KBDocumentRetentionDaysParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/kb_retention_days
+      Type: String
+      Value: "365"
+      Description: "Number of days to retain KB document chunks in OpenSearch"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "kb-config"
+
+  # System monitoring parameters
+  HealthCheckIntervalParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/health_check_interval
+      Type: String
+      Value: "300"
+      Description: "Health check interval in seconds"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "monitoring"
+
+  # Error handling configuration
+  MaxRetryAttemptsParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/max_retry_attempts
+      Type: String
+      Value: "3"
+      Description: "Maximum number of retry attempts for failed operations"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "error-handling"
+
+  RetryBackoffMultiplierParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/retry_backoff_multiplier
+      Type: String
+      Value: "2.0"
+      Description: "Exponential backoff multiplier for retry attempts"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "error-handling"
+
+  # Data quality parameters
+  MinAuditRecordSizeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/min_audit_record_size
+      Type: String
+      Value: "50"
+      Description: "Minimum size in characters for audit records to be processed"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "data-quality"
+
+  # Performance monitoring parameters
+  ProcessingMetricsEnabledParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /audit/config/processing_metrics_enabled
+      Type: String
+      Value: "true"
+      Description: "Enable detailed processing metrics collection"
+      Tags:
+        Environment: ${self:provider.stage}
+        Service: ${self:service}
+        Component: "monitoring"
+
+# Outputs
+Outputs:
+  BackfillRunningParameterName:
+    Description: Name of the backfill running status parameter
+    Value: !Ref BackfillRunningParameter
+    Export:
+      Name: ${self:service}-${self:provider.stage}-BackfillRunningParam
+      
+  BackfillCheckpointParameterName:
+    Description: Name of the backfill checkpoint parameter
+    Value: !Ref BackfillCheckpointParameter
+    Export:
+      Name: ${self:service}-${self:provider.stage}-BackfillCheckpointParam
+      
+  StreamingCheckpointParameterName:
+    Description: Name of the streaming checkpoint parameter
+    Value: !Ref StreamingLastProcessedParameter
+    Export:
+      Name: ${self:service}-${self:provider.stage}-StreamingCheckpointParam

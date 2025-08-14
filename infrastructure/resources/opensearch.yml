@@ -1,0 +1,260 @@
+# OpenSearch Domain Configuration
+# Provides vector search capabilities for embeddings
+
+Resources:
+  # OpenSearch Domain for storing and searching embeddings
+  OpenSearchDomain:
+    Type: AWS::OpenSearch::Domain
+    Properties:
+      DomainName: ${self:custom.opensearchDomain}
+      EngineVersion: OpenSearch_2.3
+      
+      # Cluster configuration
+      ClusterConfig:
+        InstanceType: t3.small.search
+        InstanceCount: 1
+        DedicatedMasterEnabled: false
+        
+      # Storage configuration
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp3
+        VolumeSize: 20
+        
+      # Network configuration
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+        TLSSecurityPolicy: Policy-Min-TLS-1-2-2019-07
+        
+      # Encryption configuration
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+        
+      # Access policy - Allow Lambda functions to access
+      AccessPolicies:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: 
+                - Fn::GetAtt: [IamRoleLambdaExecution, Arn]
+            Action: 'es:*'
+            Resource: 
+              Fn::Sub: 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${self:custom.opensearchDomain}/*'
+              
+      # Advanced options for vector search
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: 'true'
+        indices.fielddata.cache.size: '20%'
+        indices.query.bool.max_clause_count: '1024'
+
+  # Custom resource to create OpenSearch indices with proper mappings
+  OpenSearchIndicesSetup:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt OpenSearchSetupFunction.Arn
+      DomainEndpoint: !GetAtt OpenSearchDomain.DomainEndpoint
+      
+  # Lambda function to setup OpenSearch indices
+  OpenSearchSetupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ${self:service}-${self:provider.stage}-opensearch-setup
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt OpenSearchSetupRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const https = require('https');
+          const { URL } = require('url');
+          
+          // Index mappings for vector search
+          const auditChunksMapping = {
+            mappings: {
+              properties: {
+                content: { type: 'text' },
+                embedding: { 
+                  type: 'knn_vector', 
+                  dimension: 1536,
+                  method: {
+                    name: 'hnsw',
+                    space_type: 'cosinesimil',
+                    engine: 'nmslib'
+                  }
+                },
+                metadata: {
+                  properties: {
+                    timestamp: { type: 'date' },
+                    source: { type: 'keyword' },
+                    audit_id: { type: 'keyword' },
+                    user_id: { type: 'keyword' },
+                    action: { type: 'keyword' }
+                  }
+                }
+              }
+            },
+            settings: {
+              'index.knn': true,
+              'index.knn.algo_param.ef_search': 512
+            }
+          };
+          
+          const kbChunksMapping = {
+            mappings: {
+              properties: {
+                content: { type: 'text' },
+                embedding: { 
+                  type: 'knn_vector', 
+                  dimension: 1536,
+                  method: {
+                    name: 'hnsw',
+                    space_type: 'cosinesimil',
+                    engine: 'nmslib'
+                  }
+                },
+                metadata: {
+                  properties: {
+                    document_id: { type: 'keyword' },
+                    title: { type: 'text' },
+                    category: { type: 'keyword' },
+                    created_date: { type: 'date' },
+                    updated_date: { type: 'date' }
+                  }
+                }
+              }
+            },
+            settings: {
+              'index.knn': true,
+              'index.knn.algo_param.ef_search': 512
+            }
+          };
+          
+          exports.handler = async (event, context) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            if (event.RequestType === 'Delete') {
+              await sendResponse(event, context, 'SUCCESS');
+              return;
+            }
+            
+            try {
+              const endpoint = event.ResourceProperties.DomainEndpoint;
+              
+              // Create indices
+              await createIndex(endpoint, 'audits_chunks', auditChunksMapping);
+              await createIndex(endpoint, 'kb_chunks', kbChunksMapping);
+              
+              await sendResponse(event, context, 'SUCCESS');
+            } catch (error) {
+              console.error('Error:', error);
+              await sendResponse(event, context, 'FAILED', error.message);
+            }
+          };
+          
+          async function createIndex(endpoint, indexName, mapping) {
+            return new Promise((resolve, reject) => {
+              const url = new URL(`https://${endpoint}/${indexName}`);
+              const data = JSON.stringify(mapping);
+              
+              const options = {
+                hostname: url.hostname,
+                port: 443,
+                path: url.pathname,
+                method: 'PUT',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Content-Length': data.length
+                }
+              };
+              
+              const req = https.request(options, (res) => {
+                let body = '';
+                res.on('data', (chunk) => body += chunk);
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    console.log(`Index ${indexName} created successfully`);
+                    resolve(body);
+                  } else {
+                    reject(new Error(`Failed to create index: ${res.statusCode} ${body}`));
+                  }
+                });
+              });
+              
+              req.on('error', reject);
+              req.write(data);
+              req.end();
+            });
+          }
+          
+          async function sendResponse(event, context, status, reason) {
+            const responseBody = JSON.stringify({
+              Status: status,
+              Reason: reason || 'See CloudWatch logs',
+              PhysicalResourceId: context.logStreamName,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId
+            });
+            
+            const url = new URL(event.ResponseURL);
+            const options = {
+              hostname: url.hostname,
+              port: 443,
+              path: url.pathname + url.search,
+              method: 'PUT',
+              headers: {
+                'Content-Type': '',
+                'Content-Length': responseBody.length
+              }
+            };
+            
+            return new Promise((resolve) => {
+              const req = https.request(options, resolve);
+              req.write(responseBody);
+              req.end();
+            });
+          }
+
+  # IAM Role for OpenSearch setup function
+  OpenSearchSetupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - es:ESHttpGet
+                  - es:ESHttpPost
+                  - es:ESHttpPut
+                  - es:ESHttpDelete
+                Resource: 
+                  Fn::Sub: 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${self:custom.opensearchDomain}/*'
+
+# Outputs
+Outputs:
+  OpenSearchDomainEndpoint:
+    Description: OpenSearch domain endpoint
+    Value: !GetAtt OpenSearchDomain.DomainEndpoint
+    Export:
+      Name: ${self:service}-${self:provider.stage}-OpenSearchEndpoint
+      
+  OpenSearchDomainArn:
+    Description: OpenSearch domain ARN
+    Value: !GetAtt OpenSearchDomain.DomainArn
+    Export:
+      Name: ${self:service}-${self:provider.stage}-OpenSearchArn
