@@ -82,14 +82,10 @@ Answer:`;
   const command = new InvokeModelCommand({
     modelId: config.aws.bedrockModelId,
     body: JSON.stringify({
-      anthropic_version: "bedrock-2023-05-31",
-      max_tokens: maxTokens,
-      messages: [
-        {
-          role: "user",
-          content: prompt
-        }
-      ]
+      prompt: `<s>[INST] ${prompt} [/INST]`,
+      max_gen_len: maxTokens,
+      temperature: 0.1,
+      top_p: 0.9
     }),
     contentType: 'application/json',
     accept: 'application/json'
@@ -99,8 +95,8 @@ Answer:`;
   const responseBody = JSON.parse(new TextDecoder().decode(response.body));
   
   return {
-    answer: responseBody.content[0].text,
-    tokensUsed: responseBody.usage?.total_tokens || 0
+    answer: responseBody.generation,
+    tokensUsed: responseBody.prompt_token_count + responseBody.generation_token_count || 0
   };
 }
 
